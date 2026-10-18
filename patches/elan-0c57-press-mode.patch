@@ -1,1 +1,183 @@
-
+diff --git a/libfprint/drivers/elan.c b/libfprint/drivers/elan.c
+index 1b5d1e7..d99327a 100644
+--- a/libfprint/drivers/elan.c
++++ b/libfprint/drivers/elan.c
+@@ -78,6 +78,8 @@ struct _FpiDeviceElan
+   unsigned char  *last_read;
+   unsigned char   calib_atts_left;
+   unsigned char   calib_status;
++  unsigned char   finger_off_atts_left;
++  gboolean        finger_on_bg;
+   unsigned short *background;
+   unsigned char   frame_width;
+   unsigned char   frame_height;
+@@ -314,6 +316,27 @@ elan_submit_image (FpImageDevice *dev)
+ 
+   G_DEBUG_HERE ();
+ 
++  if (self->dev_type & ELAN_PRESS)
++    {
++      struct fpi_frame *frame;
++      FpImage *tmp;
++
++      /* frames are prepended, the first one is the last captured */
++      assembling_ctx.frame_width = self->frame_width;
++      assembling_ctx.frame_height = self->frame_height;
++      self->process_frame (self->frames->data, &frames);
++      frame = frames->data;
++
++      tmp = fp_image_new (self->frame_width, self->frame_height);
++      memcpy (tmp->data, frame->data, self->frame_width * self->frame_height);
++      img = fpi_image_resize (tmp, ELAN_PRESS_RESIZE, ELAN_PRESS_RESIZE);
++      g_object_unref (tmp);
++      g_slist_free_full (frames, g_free);
++
++      fpi_image_device_image_captured (dev, img);
++      return;
++    }
++
+   raw_frames = g_slist_nth (self->frames, ELAN_SKIP_LAST_FRAMES);
+ 
+   assembling_ctx.frame_width = self->frame_width;
+@@ -563,6 +586,11 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
+         {
+           fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+         }
++      else if ((self->dev_type & ELAN_PRESS) &&
++               self->num_frames >= ELAN_PRESS_FRAMES)
++        {
++          fpi_ssm_next_state (ssm);
++        }
+       else if (self->num_frames < ELAN_MAX_FRAMES)
+         {
+           /* quickly stop if finger is removed */
+@@ -590,7 +618,8 @@ capture_complete (FpiSsm *ssm, FpDevice *_dev, GError *error)
+       (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT) &&
+        fpi_ssm_get_cur_state (ssm) == CAPTURE_WAIT_FINGER))
+     {
+-      if (self->num_frames >= ELAN_MIN_FRAMES)
++      if (self->num_frames >= ((self->dev_type & ELAN_PRESS) ?
++                               ELAN_PRESS_FRAMES : ELAN_MIN_FRAMES))
+         {
+           elan_submit_image (dev);
+         }
+@@ -660,6 +689,13 @@ elan_need_calibration (FpiDeviceElan *elandev)
+   fp_dbg ("calibration mean: %d, bg mean: %d, delta: %d", calib_mean,
+           bg_mean, delta);
+ 
++  /* A background much brighter than the calibration mean means that the
++   * finger is most likely still resting on the sensor (e.g. right after a
++   * capture), calibrating now would fail. An empty background is a bad read
++   * (seen right after opening the device), it is worth reading it again too. */
++  elandev->finger_on_bg = bg_mean == 0 ||
++                          bg_mean > calib_mean + ELAN_CALIBRATION_MAX_DELTA;
++
+   return delta > ELAN_CALIBRATION_MAX_DELTA ? 1 : 0;
+ }
+ 
+@@ -716,6 +752,14 @@ calibrate_run_state (FpiSsm *ssm, FpDevice *dev)
+     case CALIBRATE_CHECK_NEEDED:
+       if (elan_need_calibration (self))
+         {
++          if (self->finger_on_bg && self->finger_off_atts_left)
++            {
++              fp_dbg ("finger on sensor or bad background, waiting before calibration");
++              self->finger_off_atts_left -= 1;
++              fpi_ssm_jump_to_state_delayed (ssm, CALIBRATE_GET_BACKGROUND,
++                                             ELAN_FINGER_OFF_DELAY);
++              break;
++            }
+           self->calib_status = 0;
+           fpi_ssm_next_state (ssm);
+         }
+@@ -796,6 +840,7 @@ elan_calibrate (FpiDeviceElan *self)
+   g_return_if_fail (!self->active);
+   self->active = TRUE;
+   self->calib_atts_left = ELAN_CALIBRATION_ATTEMPTS;
++  self->finger_off_atts_left = ELAN_FINGER_OFF_ATTEMPTS;
+ 
+   FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), calibrate_run_state,
+                              CALIBRATE_NUM_STATES);
+@@ -859,7 +904,9 @@ activate_run_state (FpiSsm *ssm, FpDevice *dev)
+           self->frame_height++;
+           self->raw_frame_height = self->frame_height;
+         }
+-      if (self->frame_height > ELAN_MAX_FRAME_HEIGHT)
++      /* press sensors use the whole area, there is no swipe to assemble */
++      if (self->frame_height > ELAN_MAX_FRAME_HEIGHT &&
++          !(self->dev_type & ELAN_PRESS))
+         self->frame_height = ELAN_MAX_FRAME_HEIGHT;
+       fp_dbg ("sensor dimensions, WxH: %dx%d", self->frame_width,
+               self->raw_frame_height);
+diff --git a/libfprint/drivers/elan.h b/libfprint/drivers/elan.h
+index 7d08994..9e12454 100644
+--- a/libfprint/drivers/elan.h
++++ b/libfprint/drivers/elan.h
+@@ -31,6 +31,8 @@
+ #define ELAN_0907 (1 << 0)
+ #define ELAN_0C03 (1 << 1)
+ #define ELAN_0C42 (1 << 2)
++/* square area sensors used by touch instead of swipe (e.g. 0c57) */
++#define ELAN_PRESS (1 << 3)
+ 
+ /* devices which don't require frame rotation before assembling */
+ #define ELAN_NOT_ROTATED ELAN_0C03
+@@ -46,6 +48,16 @@
+  * generally prevents calibration from looping indefinitely */
+ #define ELAN_CALIBRATION_ATTEMPTS 10
+ 
++/* times to re-read the background (every ELAN_FINGER_OFF_DELAY ms) while the
++ * finger is still on the sensor before giving up and calibrating anyway */
++#define ELAN_FINGER_OFF_ATTEMPTS 50
++#define ELAN_FINGER_OFF_DELAY 100
++
++/* press sensors: frames to read after the finger is detected, the last one
++ * (the most settled) is used, and the scale factor applied to it */
++#define ELAN_PRESS_FRAMES 3
++#define ELAN_PRESS_RESIZE 2
++
+ /* min and max frames in a capture */
+ #define ELAN_MIN_FRAMES 7
+ #define ELAN_MAX_FRAMES 30
+@@ -221,6 +233,7 @@ static const FpIdEntry elan_id_table[] = {
+   {.vid = ELAN_VEND_ID,  .pid = 0x0c63, .driver_data = ELAN_ALL_DEV},
+   {.vid = ELAN_VEND_ID,  .pid = 0x0c6e, .driver_data = ELAN_ALL_DEV},
+   {.vid = ELAN_VEND_ID,  .pid = 0x0c58, .driver_data = ELAN_ALL_DEV},
++  {.vid = ELAN_VEND_ID,  .pid = 0x0c57, .driver_data = ELAN_PRESS},
+   {.vid = 0,  .pid = 0,  .driver_data = 0},
+ };
+ 
+diff --git a/libfprint/meson.build b/libfprint/meson.build
+index 116c411..18834b9 100644
+--- a/libfprint/meson.build
++++ b/libfprint/meson.build
+@@ -164,6 +164,8 @@ helper_sources = {
+         [ 'drivers/aesx660.c' ],
+     'aes3k' :
+         [ 'drivers/aes3k.c' ],
++    'pixman' :
++        [ ],
+     'openssl' :
+         [ ],
+     'udev' :
+diff --git a/meson.build b/meson.build
+index 9a0aaa4..a15d2f1 100644
+--- a/meson.build
++++ b/meson.build
+@@ -211,6 +211,7 @@ driver_helper_mapping = {
+     'aes3500' : [ 'aeslib', 'aes3k' ],
+     'aes4000' : [ 'aeslib', 'aes3k' ],
+     'uru4000' : [ 'openssl' ],
++    'elan'    : [ 'pixman' ],
+     'elanspi' : [ 'udev' ],
+     'virtual_image'          : [ 'virtual' ],
+     'virtual_device'         : [ 'virtual' ],
+@@ -259,7 +260,7 @@ foreach i : driver_helpers
+         endif
+     endforeach
+ 
+-    if i == 'aes3k'
++    if i == 'aes3k' or i == 'pixman'
+         imaging_dep = dependency('pixman-1', required: false)
+         if not imaging_dep.found()
+             error('pixman is required for @0@ and possibly others'.format(driver))
