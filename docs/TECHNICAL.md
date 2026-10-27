@@ -22,7 +22,7 @@ EP 0x83 IN  bulk 64
   (one image = 12800 bytes).
 - It is a **press (touch) sensor**, not a swipe sensor.
 
-## Command sequence of the ELAN driver
+## Command sequence of ELAN's proprietary driver
 
 Traced with `ELAN_LED_TRACE=1` (one touch during enrollment):
 
@@ -40,7 +40,10 @@ Traced with `ELAN_LED_TRACE=1` (one touch during enrollment):
 The ELAN driver never sends `40 31` (LED on), so the LED stays off unless the
 hook in `src/elan-led.c` adds it. `00 0b` (stop) switches the LED off.
 
-## Binary patches applied to the ELAN driver
+## Binary patches applied to the ELAN driver (earlier versions, no longer used)
+
+Earlier versions of this project installed ELAN's proprietary driver,
+patched as below. The open source driver (last section) replaced it.
 
 Original file: `libfprint-2-tod1-elan.so` from
 [TonyHoyle/libfprint-2-tod1-elan](https://github.com/TonyHoyle/libfprint-2-tod1-elan)
@@ -84,7 +87,40 @@ matchers available in libfprint are **not reliable** on an 80x80 area:
 Normalising the raw frames with a 2nd–98th percentile linear stretch gave
 visibly sharper ridges than the driver's "thirds" normalisation.
 
-A fully open source solution would need a matcher designed for very small
-sensors (for example mosaicking the enrolled touches into a larger template
-and matching by correlation). Until then, the ELAN algorithm in the
-proprietary driver is the practical option.
+A fully open source solution needed a matcher designed for very small
+sensors: see below.
+
+## The open source driver (driver/)
+
+Written in Rust; it replaced ELAN's proprietary driver in this project.
+
+- **Protocol** as above, following the `elan` driver with the press-mode
+  patch: background → calibration mean `40 24` → recalibration (`40 23`,
+  status `0x01` then `0x03`) if they differ by more than 500, re-reading the
+  background while the finger is still down → LED `40 31` → wait for finger
+  `40 3f` → up to 3 images `00 09`, the last one kept → stop `00 0b`. The wait
+  for a finger is read again every 500 ms, so it can be cancelled. A reply
+  other than `0x55` (e.g. `0xca`, seen at the first capture after boot) is a
+  spurious wake: the driver stops, waits 200 ms and starts over from the
+  calibration, up to 5 times, because GDM and `pam_fprintd` do not retry a
+  failed verify.
+- **Image**: raw frame minus background; local contrast normalisation
+  (Gaussian high-pass divided by the local standard deviation, sigma 4); the
+  touched area is where the smoothed contrast exceeds 0.35 x its median,
+  eroded by 2 pixels. A touch covering less than 0.85 of the sensor is
+  partial (a full one covers 0.90) and must be repeated.
+- **Matcher**: masked normalised cross-correlation (Padfield 2012) between
+  the probe and each enrolled touch, for every shift leaving at least 35% of
+  the image in common, rotations searched every 10° and then ±5° around the
+  best one (±30° in all). Single precision 135x135 FFTs; about 40 ms per
+  verification on 8 threads.
+- **Results** on 75 touches of 3 fingers, against phase-only correlation:
+
+| Matcher | Genuine accepted with no impostor accepted (threshold chosen on the data) |
+|---|---|
+| Phase-only correlation | 77% |
+| Band-limited POC | 74% |
+| Masked NCC | 81%, 85% without partial touches |
+
+  With the fixed threshold 0.86: 79% of genuine touches accepted, 0 of 1360
+  impostor attempts (highest impostor score 0.825).
