@@ -1,5 +1,0 @@
-# SPDX-License-Identifier: LGPL-2.1-or-later
-# Version script for libelancrypto.so: OpenSSL 1.1 EVP shim + gusb hook
-# (see crypto-compat.c and elan-led.c)
-OPENSSL_1_1_0 { global: EVP_*; local: *; };
-LIBGUSB_0.1.0 { global: e_usb_device_bulk_transfer_async; };
