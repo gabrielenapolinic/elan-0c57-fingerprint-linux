@@ -1,0 +1,4 @@
+[submodule "build/libfprint-tod"]
+	path = build/libfprint-tod
+	url = https://gitlab.freedesktop.org/3v1n0/libfprint.git
+	branch = tod

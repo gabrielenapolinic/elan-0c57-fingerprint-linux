@@ -45,7 +45,7 @@ mkdir -p "$BUILD"
 # --- 1. libfprint-TOD -------------------------------------------------------
 
 step fetch_tod "$TOD_COMMIT"
-if [ ! -d "$TOD_SRC/.git" ]; then
+if [ ! -e "$TOD_SRC/.git" ]; then
   git clone --branch "$TOD_BRANCH" "$TOD_REPO" "$TOD_SRC"
 fi
 git -C "$TOD_SRC" fetch --quiet origin "$TOD_BRANCH"
