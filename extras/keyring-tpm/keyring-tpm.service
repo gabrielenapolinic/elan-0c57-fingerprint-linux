@@ -1,0 +1,11 @@
+[Unit]
+Description=Unlock the GNOME keyring with the secret sealed in the TPM
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/keyring-tpm unlock
+
+[Install]
+WantedBy=graphical-session.target
