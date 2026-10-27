@@ -1,0 +1,217 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: LGPL-2.1-or-later
+"""keyring-tpm — unlocks the GNOME "login" keyring with a secret sealed in the TPM.
+
+Logging in with a fingerprint provides no password, so gnome-keyring stays locked.
+This tool stores the keyring password encrypted with systemd-creds
+(host key + TPM2 bound to PCR 7 = Secure Boot state) and uses it at the
+start of the session to unlock the keyring over D-Bus.
+
+Commands:
+  setup     seal the login password (= keyring password) in the TPM
+            and enable automatic unlocking
+  update    same as setup: use it after changing the login password
+            or if the TPM no longer releases it (e.g. after a BIOS update)
+  unlock    unlock the keyring (used by the service at login)
+  status    show the current state
+  remove    disable automatic unlocking and delete the secret
+"""
+
+import getpass
+import os
+import subprocess
+import sys
+import time
+
+from gi.repository import Gio, GLib
+
+CRED_DIR = os.path.expanduser("~/.config/keyring-tpm")
+CRED_FILE = os.path.join(CRED_DIR, "login.cred")
+CRED_NAME = "keyring-login"
+SERVICE = "keyring-tpm.service"
+
+BUS_NAME = "org.freedesktop.secrets"
+SVC_PATH = "/org/freedesktop/secrets"
+LOGIN = "/org/freedesktop/secrets/collection/login"
+GUILT = "org.gnome.keyring.InternalUnsupportedGuiltRiddenInterface"
+
+
+# ---------- D-Bus / gnome-keyring ----------
+
+def bus():
+    return Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+
+def call(conn, path, iface, method, args, reply=None):
+    return conn.call_sync(BUS_NAME, path, iface, method, args,
+                          GLib.VariantType(reply) if reply else None,
+                          Gio.DBusCallFlags.NONE, 10000, None)
+
+
+def wait_for_keyring(conn, timeout=30):
+    """Waits for the secrets service to answer (it can be slow at login)."""
+    end = time.time() + timeout
+    while True:
+        try:
+            call(conn, SVC_PATH, "org.freedesktop.DBus.Peer", "Ping", None)
+            return
+        except GLib.Error:
+            if time.time() > end:
+                raise
+            time.sleep(0.5)
+
+
+def is_locked(conn):
+    v = call(conn, LOGIN, "org.freedesktop.DBus.Properties", "Get",
+             GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")), "(v)")
+    return v.unpack()[0]
+
+
+def secret(conn, password):
+    # "plain" session: the secret only travels over the local session bus.
+    out = call(conn, SVC_PATH, "org.freedesktop.Secret.Service", "OpenSession",
+               GLib.Variant("(sv)", ("plain", GLib.Variant("s", ""))), "(vo)")
+    session = out.unpack()[1]
+    return (session, b"", password.encode(), "text/plain")
+
+
+def unlock(conn, password):
+    call(conn, SVC_PATH, GUILT, "UnlockWithMasterPassword",
+         GLib.Variant("(o(oayays))", (LOGIN, secret(conn, password))))
+
+
+def change(conn, old, new):
+    call(conn, SVC_PATH, GUILT, "ChangeWithMasterPassword",
+         GLib.Variant("(o(oayays)(oayays))", (LOGIN, secret(conn, old), secret(conn, new))))
+
+
+def lock(conn):
+    call(conn, SVC_PATH, "org.freedesktop.Secret.Service", "Lock",
+         GLib.Variant("(ao)", ([LOGIN],)), "(aoo)")
+
+
+def check_password(conn, password):
+    """Checks the password without locking the keyring: 'changes' it to itself."""
+    try:
+        change(conn, password, password)
+        return True
+    except GLib.Error:
+        return False
+
+
+# ---------- TPM (systemd-creds) ----------
+
+def seal(password):
+    os.makedirs(CRED_DIR, mode=0o700, exist_ok=True)
+    tmp = CRED_FILE + ".new"
+    subprocess.run(["systemd-creds", "--user", "--with-key=host+tpm2", "--tpm2-pcrs=7",
+                    f"--name={CRED_NAME}", "encrypt", "-", tmp],
+                   input=password.encode(), check=True)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CRED_FILE)
+
+
+def unseal():
+    r = subprocess.run(["systemd-creds", "--user", f"--name={CRED_NAME}",
+                        "decrypt", CRED_FILE, "-"], capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.decode().strip() or "TPM decryption failed")
+    return r.stdout.decode()
+
+
+# ---------- commands ----------
+
+def notify(msg):
+    subprocess.run(["notify-send", "-i", "dialog-password", "-a", "Keyring",
+                    "Keyring not unlocked", msg], check=False)
+
+
+def enable_service():
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", SERVICE], check=True)
+
+
+def verify_roundtrip(conn):
+    """Locks the keyring and reopens it with the secret taken from the TPM."""
+    lock(conn)
+    unlock(conn, unseal())
+    return not is_locked(conn)
+
+
+def cmd_setup():
+    conn = bus()
+    wait_for_keyring(conn)
+    pw = getpass.getpass("Login password (the one you use to log in and for sudo): ")
+    if not check_password(conn, pw):
+        sys.exit("Wrong password: nothing changed.")
+    seal(pw)
+    print("✓ Password sealed in the TPM (Secure Boot, PCR 7).")
+    if not verify_roundtrip(conn):
+        sys.exit("✗ Check failed: the keyring did not reopen from the TPM.")
+    print("✓ Check passed: keyring locked and reopened from the TPM.")
+    enable_service()
+    print("✓ Automatic unlocking enabled from the next fingerprint login.")
+
+
+def cmd_update():
+    conn = bus()
+    wait_for_keyring(conn)
+    pw = getpass.getpass("Login password: ")
+    if not check_password(conn, pw):
+        sys.exit("Wrong password: nothing to update.")
+    seal(pw)
+    if not verify_roundtrip(conn):
+        sys.exit("✗ Check failed.")
+    enable_service()
+    print("✓ Password sealed in the TPM again and verified.")
+
+
+def cmd_unlock():
+    conn = bus()
+    wait_for_keyring(conn)
+    if not is_locked(conn):
+        print("Keyring already unlocked.")
+        return
+    if not os.path.exists(CRED_FILE):
+        notify("No secret in the TPM. Run: keyring-tpm setup")
+        sys.exit(1)
+    try:
+        unlock(conn, unseal())
+    except (RuntimeError, GLib.Error) as e:
+        notify("The TPM did not release the right password (changed password or "
+               "Secure Boot state?). Unlock manually with the login password, then run: keyring-tpm update")
+        sys.exit(f"Unlock failed: {e}")
+    if is_locked(conn):
+        notify("The password in the TPM is no longer valid. Run: keyring-tpm update")
+        sys.exit("Unlock failed: password not accepted.")
+    print("Keyring unlocked from the TPM.")
+
+
+def cmd_status():
+    conn = bus()
+    wait_for_keyring(conn, 5)
+    print("Login keyring:  ", "LOCKED" if is_locked(conn) else "unlocked")
+    print("Secret in TPM:  ", CRED_FILE if os.path.exists(CRED_FILE) else "missing")
+    r = subprocess.run(["systemctl", "--user", "is-enabled", SERVICE],
+                       capture_output=True, text=True)
+    print("Service:        ", r.stdout.strip() or "missing")
+
+
+def cmd_remove():
+    subprocess.run(["systemctl", "--user", "disable", SERVICE], check=False)
+    if os.path.exists(CRED_FILE):
+        os.remove(CRED_FILE)
+    print("✓ Automatic unlocking disabled and secret deleted from disk.")
+
+
+COMMANDS = {"setup": cmd_setup, "update": cmd_update, "unlock": cmd_unlock,
+            "status": cmd_status, "remove": cmd_remove}
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
+        print(__doc__)
+        sys.exit(2)
+    try:
+        COMMANDS[sys.argv[1]]()
+    except KeyboardInterrupt:
+        sys.exit("\nCancelled.")

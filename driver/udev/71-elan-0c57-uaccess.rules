@@ -1,0 +1,3 @@
+# Give the logged-in user access to the ELAN 04f3:0c57 fingerprint reader,
+# so that elan-capture works without sudo. fprintd runs as root and is not affected.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04f3", ATTRS{idProduct}=="0c57", TAG+="uaccess"

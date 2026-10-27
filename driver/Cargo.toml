@@ -1,0 +1,23 @@
+[package]
+name = "elan-0c57"
+version = "0.1.0"
+edition = "2024"
+description = "Open source user-space driver for the ELAN 04f3:0c57 fingerprint reader"
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/gabrielenicolanapoli/elan-0c57-fingerprint-linux"
+authors = ["Gabriele Nicola Napoli <gabrielenicolanapoli@gmail.com>"]
+rust-version = "1.85"
+
+[lib]
+# staticlib: linked into the libfprint-TOD driver (tod/)
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+png = "0.17"
+rusb = "0.9"
+rustfft = "6"
+
+[profile.release]
+lto = true
