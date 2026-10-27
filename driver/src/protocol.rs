@@ -34,6 +34,11 @@ pub const MIN_CALIBRATION_FW: u16 = 0x0138;
 
 /// Reply byte of [`Command::WaitFinger`] when a finger is on the sensor.
 pub const FINGER_PRESENT: u8 = 0x55;
+/// Other replies to [`Command::WaitFinger`] (e.g. 0xca, seen at the first
+/// capture after boot) are spurious wakes: recalibrate and wait again, at
+/// most this many times.
+pub const SPURIOUS_WAKE_ATTEMPTS: u32 = 5;
+pub const SPURIOUS_WAKE_DELAY: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {

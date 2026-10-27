@@ -25,6 +25,9 @@ DEST="$PREFIX/$LIBDIR"
 
 [ -e "$DEST/libfprint-2/tod-1/$MARKER_NAME" ] || die no_install "$DEST"
 
+# a running fprintd crashes if its libraries change under it
+systemctl stop fprintd.service 2>/dev/null || true
+
 rm -f "$DEST/libfprint-2/tod-1/libfprint-2-tod1-elan0c57-rs.so" \
       "$DEST/libfprint-2/tod-1/$MARKER_NAME" \
       "$DEST/libfprint-2/tod-1/libfprint-2-tod1-elan-0c57.so" \
@@ -44,7 +47,6 @@ fi
 
 ldconfig
 command -v restorecon >/dev/null && restorecon -R "$DEST"
-systemctl stop fprintd.service 2>/dev/null || true
 
 msg uninstalled
 echo "  fprintd-delete \$USER"

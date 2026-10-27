@@ -53,6 +53,10 @@ if [ -e "$DEST/libfprint-2.so.2.0.0" ] && [ ! -e "$MARKER" ]; then
   msg backup_ok
 fi
 
+# a running fprintd crashes if its libraries change under it; it is
+# restarted on demand (D-Bus activation)
+systemctl stop fprintd.service 2>/dev/null || true
+
 # --- ELAN's proprietary driver (earlier versions) ---------------------------
 LEGACY=(
   "$DEST/libfprint-2/tod-1/libfprint-2-tod1-elan-0c57.so"
@@ -86,8 +90,6 @@ if command -v restorecon >/dev/null; then
   restorecon -R "$DEST"            # SELinux labels (Fedora)
 fi
 
-systemctl stop fprintd.service 2>/dev/null || true
-
 # --- check ------------------------------------------------------------------
 step check
 FPRINTD="$(command -v fprintd 2>/dev/null || true)"
@@ -108,5 +110,5 @@ echo "  fprintd-enroll -f right-index-finger"
 msg then_test
 echo "  fprintd-verify"
 echo
-msg old_prints
+[ -n "${legacy_found:-}" ] && msg old_prints
 msg password

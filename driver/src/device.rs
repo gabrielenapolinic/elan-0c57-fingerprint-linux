@@ -249,9 +249,22 @@ impl<T: Transport> Sensor<T> {
     }
 
     fn capture_inner(&mut self, timeout: Option<Duration>, cancel: &dyn Fn() -> bool) -> Result<Touch> {
-        let background = self.calibrate()?;
-        self.led_on()?;
-        self.wait_finger_cancellable(timeout, cancel)?;
+        let mut spurious_left = protocol::SPURIOUS_WAKE_ATTEMPTS;
+        let background = loop {
+            let background = self.calibrate()?;
+            self.led_on()?;
+            match self.wait_finger_cancellable(timeout, cancel) {
+                Ok(()) => break background,
+                // A failed verify ends the login attempt (GDM and pam_fprintd
+                // do not retry), so start over instead of giving up.
+                Err(Error::Protocol(_)) if spurious_left > 0 && !cancel() => {
+                    spurious_left -= 1;
+                    self.stop()?;
+                    sleep(protocol::SPURIOUS_WAKE_DELAY);
+                }
+                Err(e) => return Err(e),
+            }
+        };
         let mut frame = self.read_image()?;
         for _ in 1..protocol::PRESS_FRAMES {
             // The finger may already be gone: keep the last good frame.
@@ -377,6 +390,31 @@ mod tests {
         let touch = s.capture(Duration::from_secs(1)).unwrap();
         assert_eq!(touch.print.pixels, vec![3000; 16]);
         assert_eq!(s.transport.sent.last(), Some(&[0x00, 0x0b]));
+    }
+
+    #[test]
+    fn capture_retries_after_a_spurious_wake() {
+        let mut s = sensor(Fake {
+            images: [3000, 3000, 6000].into(),
+            means: [3000, 3000].into(),
+            fingers: [Some(0xca), Some(0x55), None].into(),
+            ..Default::default()
+        });
+        let touch = s.capture(Duration::from_secs(1)).unwrap();
+        assert_eq!(touch.print.pixels, vec![3000; 16]);
+        assert_eq!(s.transport.sent.iter().filter(|c| **c == [0x00, 0x0b]).count(), 2);
+    }
+
+    #[test]
+    fn capture_gives_up_after_repeated_spurious_wakes() {
+        let n = protocol::SPURIOUS_WAKE_ATTEMPTS as usize + 1;
+        let mut s = sensor(Fake {
+            images: vec![3000; n].into(),
+            means: vec![3000; n].into(),
+            fingers: vec![Some(0xca); n].into(),
+            ..Default::default()
+        });
+        assert!(matches!(s.capture(Duration::from_secs(1)), Err(Error::Protocol(_))));
     }
 
     #[test]

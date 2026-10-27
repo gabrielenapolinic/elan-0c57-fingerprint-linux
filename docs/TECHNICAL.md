@@ -99,7 +99,11 @@ Written in Rust; it replaced ELAN's proprietary driver in this project.
   status `0x01` then `0x03`) if they differ by more than 500, re-reading the
   background while the finger is still down → LED `40 31` → wait for finger
   `40 3f` → up to 3 images `00 09`, the last one kept → stop `00 0b`. The wait
-  for a finger is read again every 500 ms, so it can be cancelled.
+  for a finger is read again every 500 ms, so it can be cancelled. A reply
+  other than `0x55` (e.g. `0xca`, seen at the first capture after boot) is a
+  spurious wake: the driver stops, waits 200 ms and starts over from the
+  calibration, up to 5 times, because GDM and `pam_fprintd` do not retry a
+  failed verify.
 - **Image**: raw frame minus background; local contrast normalisation
   (Gaussian high-pass divided by the local standard deviation, sigma 4); the
   touched area is where the smoothed contrast exceeds 0.35 x its median,

@@ -129,6 +129,8 @@ The sequence follows libfprint's `elan` driver with the press-mode patch:
 read background → calibration mean `40 24` → recalibrate with `40 23` if the
 two differ by more than 500 → LED `40 31` → wait for finger `40 3f` → up to
 3 images `00 09` (the last one is kept) → stop `00 0b`.
+A reply other than `0x55` to `40 3f` (e.g. `0xca` at the first capture after
+boot) is a spurious wake: stop, wait 200 ms and start over, up to 5 times.
 
 ## License
 
