@@ -12,9 +12,10 @@ BUILD="$TOP/build"
 MARKER_NAME=".elan-0c57-fingerprint-linux"
 LDCONF="/etc/ld.so.conf.d/elan-0c57-fingerprint-linux.conf"
 
-die () { echo "ERROR: $*" >&2; exit 1; }
+# shellcheck source=lib/i18n.sh
+. "$TOP/lib/i18n.sh"
 
-[ "$(id -u)" -eq 0 ] || die "run as root: sudo ./uninstall.sh"
+[ "$(id -u)" -eq 0 ] || die run_as_root "./uninstall.sh"
 
 PREFIX=/usr/local
 LIBDIR=lib64
@@ -22,18 +23,23 @@ LIBDIR=lib64
 [ -f "$BUILD/stage.conf" ] && . "$BUILD/stage.conf"
 DEST="$PREFIX/$LIBDIR"
 
-[ -e "$DEST/libfprint-2/tod-1/$MARKER_NAME" ] || die "no installation found in $DEST"
+[ -e "$DEST/libfprint-2/tod-1/$MARKER_NAME" ] || die no_install "$DEST"
 
-rm -f "$DEST/libfprint-2/tod-1/libfprint-2-tod1-elan-0c57.so" \
+# a running fprintd crashes if its libraries change under it
+systemctl stop fprintd.service 2>/dev/null || true
+
+rm -f "$DEST/libfprint-2/tod-1/libfprint-2-tod1-elan0c57-rs.so" \
       "$DEST/libfprint-2/tod-1/$MARKER_NAME" \
+      "$DEST/libfprint-2/tod-1/libfprint-2-tod1-elan-0c57.so" \
+      "$DEST/libfprint-2/disabled/libfprint-2-tod1-elan-0c57.so" \
       "$DEST/libelancrypto.so" \
       "$DEST/libfprint-2-tod.so" "$DEST/libfprint-2-tod.so.1" \
       "$DEST/libfprint-2.so" "$DEST/libfprint-2.so.2" "$DEST/libfprint-2.so.2.0.0"
-rmdir "$DEST/libfprint-2/tod-1" "$DEST/libfprint-2" 2>/dev/null || true
+rmdir "$DEST/libfprint-2/tod-1" "$DEST/libfprint-2/disabled" "$DEST/libfprint-2" 2>/dev/null || true
 
 if [ -f "$BUILD/backup-path" ] && [ -d "$(cat "$BUILD/backup-path")" ]; then
   BACKUP="$(cat "$BUILD/backup-path")"
-  echo "Restoring the previous libfprint from $BACKUP"
+  msg restoring "$BACKUP"
   cp -a "$BACKUP"/libfprint-2.so* "$DEST/"
 else
   rm -f "$LDCONF"
@@ -41,7 +47,6 @@ fi
 
 ldconfig
 command -v restorecon >/dev/null && restorecon -R "$DEST"
-systemctl stop fprintd.service 2>/dev/null || true
 
-echo "Uninstalled. Prints enrolled with the ELAN driver can't be used by other"
-echo "drivers, remove them with:  fprintd-delete \$USER"
+msg uninstalled
+echo "  fprintd-delete \$USER"

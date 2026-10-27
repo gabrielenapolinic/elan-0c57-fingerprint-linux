@@ -1,5 +1,11 @@
 # ELAN 04f3:0c57 fingerprint reader on Linux
 
+[![license: LGPL v2.1 or later](images/license-lgpl.svg)](LICENSE)
+![driver: 100% open source](images/driver.svg)
+![Rust: 1.85+](images/rust.svg)
+![platform: Fedora](images/platform.svg)
+![languages: EN · IT · FR · DE · ES · PT](images/languages.svg)
+
 ## Overview
 
 Make the **ELAN `04f3:0c57`** fingerprint reader (`ELAN:Fingerprint`, found in
@@ -8,23 +14,25 @@ with your fingerprint, LED included.
 
 The reader is not supported by upstream libfprint
 ([libfprint#323](https://gitlab.freedesktop.org/libfprint/libfprint/-/issues/323)).
-This project reuses ELAN's own Linux driver for the closely related
-`04f3:0c4b` reader (shipped by Lenovo for the ThinkPad E14 Gen 4), which
-contains ELAN's matching algorithm, and adapts it to the `0c57`.
+This project provides a **fully open source driver written in Rust**: sensor
+protocol, image processing and a matcher designed for the tiny 80x80 sensor,
+plugged into `fprintd` through libfprint-TOD.
 
-> **Status:** works well on the tested machine, but it is not perfect: now and
-> then a touch is rejected and has to be repeated (see [Results](#results)).
-> This is an unofficial project, not affiliated with ELAN or Lenovo.
+> **Status:** works well on the tested machine. The sensor only sees about
+> 4x4 mm of the finger, so now and then a touch has to be repeated (see
+> [Results](#results)). This is an unofficial project, not affiliated with ELAN or Lenovo.
 
 ---
 
 ## Key Features
 
 * **Fingerprint login, lock screen and `sudo`** through the standard `fprintd` stack.
-* **ELAN's own matching algorithm:** reuses ELAN's Linux TOD driver for the related `0c4b` reader, patched for the `0c57`.
-* **No proprietary code in the repository:** the ELAN driver is downloaded, checked against a known SHA-256 and patched on your machine.
-* **OpenSSL 3 compatibility shim** replacing the OpenSSL 1.1 dependency of the driver.
-* **Working LED:** the LED blinks once per touch.
+* **100% open source:** no proprietary ELAN code, no binary patches, no OpenSSL 1.1 shim.
+* **Written in Rust:** USB protocol, calibration, capture and matching, with a small C adapter for libfprint-TOD.
+* **Matcher for small sensors:** masked normalised cross-correlation over rotations and shifts, about 40 ms per verification.
+* **Partial touches detected:** if the finger covers too little of the sensor, you are asked to touch again.
+* **Working LED** while the reader waits for a finger.
+* **Automatic language:** the scripts and the `elan-capture` / `elan-match` tools speak English, Italian, French, German, Spanish or Portuguese, following the system.
 * **Clean install and uninstall:** everything goes to `/usr/local`, distribution packages are not touched, previous files are backed up.
 * **Optional GNOME keyring unlock** via the TPM, so the fingerprint works exactly like the password.
 
@@ -32,11 +40,18 @@ contains ELAN's matching algorithm, and adapts it to the `0c57`.
 
 ## Repository Structure
 
-* `build.sh`: clones libfprint-TOD and the ELAN driver at pinned commits, patches and builds them into `build/stage/`.
+* `build.sh`: clones libfprint-TOD at a pinned commit and builds it together with the driver into `build/stage/`.
 * `install.sh` / `uninstall.sh`: install to / remove from `/usr/local` (as root), with backup and restore.
-* `src/`: sources of `libelancrypto.so` (OpenSSL shim and LED hook).
-* `patches/`: experimental patch for the open source `elan` driver.
+* `lib/i18n.sh`: translations of the scripts' messages (`driver/src/i18n.rs` for the tools).
+* `driver/`: the open source driver ([details](driver/README.md)):
+  * `src/`: Rust library (`protocol`, `device`, `image`, `matcher`, `print`, `ffi`);
+  * `src/bin/`: `elan-capture` (talks to the reader, collects datasets) and `elan-match` (evaluates the matcher);
+  * `tod/`: the C adapter for libfprint-TOD, and `try.sh` to test it without installing;
+  * `research/`: Python reference of the matcher, used to validate the Rust port;
+  * `udev/`: optional rule to use `elan-capture` without root.
 * `docs/TECHNICAL.md`: protocol findings and experiments.
+* `images/`: README badges.
+* `patches/`: earlier experiment with libfprint's own `elan` driver.
 * `extras/keyring-tpm/`: optional tool to unlock the GNOME keyring after a fingerprint login.
 
 ---
@@ -48,7 +63,6 @@ contains ELAN's matching algorithm, and adapts it to the `0c57`.
 | Laptop | Lenovo IdeaPad 3 15IML05 (machine type 81WB) |
 | Reader | `04f3:0c57` ELAN:Fingerprint, firmware 0x0216, 80x80 press sensor |
 | OS | Fedora 44, kernel 7.2, fprintd 1.94.5 |
-| Arch | x86_64 only (the ELAN driver is an x86_64 binary) |
 
 Check your reader with `lsusb | grep 04f3:0c57`.
 
@@ -57,38 +71,26 @@ Check your reader with `lsusb | grep 04f3:0c57`.
 ## How it works
 
 ```
-fprintd ──> libfprint-TOD ──loads──> libfprint-2-tod1-elan-0c57.so  (ELAN binary, patched)
-                                              │
-                                              └─needs─> libelancrypto.so  (this project)
-                                                          ├─ OpenSSL 1.1 EVP shim → OpenSSL 3
-                                                          └─ LED hook on USB transfers
+fprintd ──> libfprint-TOD ──loads──> libfprint-2-tod1-elan0c57-rs.so
+                                        ├─ C adapter (driver/tod): enroll, verify, identify, cancel
+                                        └─ Rust library (driver/src)
+                                             ├─ USB protocol: calibration, finger detection, capture
+                                             ├─ image: background removal, contrast normalisation
+                                             └─ matcher: masked NCC over rotations and shifts
 ```
 
 1. **[libfprint-TOD](https://gitlab.freedesktop.org/3v1n0/libfprint/-/tree/tod)**
-   is libfprint with support for binary "Touch OEM Drivers". It is built and
+   is libfprint able to load drivers built outside of it. It is built and
    installed in `/usr/local`, where it takes precedence over the distribution
    libfprint, without touching any package.
-2. The **ELAN TOD driver** for `0c4b` is downloaded from its
-   [original source](https://github.com/TonyHoyle/libfprint-2-tod1-elan)
-   (extracted from Lenovo's Ubuntu driver package), checked against a known
-   SHA-256 and patched in three places (each one checked before and after):
-   - the USB id table entry `04f3:0c4b` becomes `04f3:0c57`;
-   - its dependency on `libcrypto.so.1.1` (OpenSSL 1.1, no longer shipped by
-     current distributions) is renamed to `libelancrypto.so`;
-   - its import of `g_usb_device_bulk_transfer_async` is renamed to
-     `e_usb_device_bulk_transfer_async`, so that USB transfers go through the
-     LED hook.
-3. **`libelancrypto.so`** (sources in [`src/`](src)) provides:
-   - the 9 OpenSSL 1.1 EVP functions used by the driver (AES-256-CBC, SHA-256)
-     forwarded to the system OpenSSL 3;
-   - the LED handling: the ELAN driver never switches the LED on, so the hook
-     sends "LED on" (`40 31`) before the driver waits for a finger (`40 3f`)
-     and "LED off" (`00 0b`) once the image has been read, before the driver
-     waits for the finger to be lifted (`40 3e`). The LED blinks once per
-     touch, like with the open source `elan` driver.
-
-The proprietary driver is **not** included in this repository: `build.sh`
-downloads it and applies the changes on your machine.
+2. The **driver** talks to the sensor with the protocol of libfprint's `elan`
+   driver (commands on endpoint `0x01`, replies on `0x83`, 80x80 16 bit images
+   on `0x82`), recalibrating before each touch.
+3. **Enrolling** takes 12 touches, stored by `fprintd` as the print. To
+   **verify**, a new touch is compared with each of them, rotated up to ±30°
+   and shifted over every position that leaves at least 35% of the image in
+   common; the best normalised correlation over the touched area is the score.
+   It is a match from **0.86** up.
 
 ---
 
@@ -97,12 +99,12 @@ downloads it and applies the changes on your machine.
 ### 1. Dependencies (Fedora)
 
 ```sh
-sudo dnf install git gcc meson ninja-build pkgconf-pkg-config \
-    glib2-devel libgusb-devel openssl-devel fprintd fprintd-pam
+sudo dnf install git gcc make meson ninja-build pkgconf-pkg-config \
+    glib2-devel libgusb-devel libusb1-devel rust cargo fprintd fprintd-pam
 ```
 
-On other distributions install the equivalent packages (glib, gusb, OpenSSL 3
-development files, meson, ninja). Only Fedora has been tested.
+On other distributions install the equivalent packages (glib, gusb, libusb,
+Rust, meson, ninja). Only Fedora has been tested.
 
 ### 2. Build (as a normal user)
 
@@ -110,8 +112,8 @@ development files, meson, ninja). Only Fedora has been tested.
 ./build.sh
 ```
 
-This clones libfprint-TOD and the ELAN driver at pinned commits into `build/`,
-builds them and prepares the files to install in `build/stage/`. Nothing is
+This clones libfprint-TOD at a pinned commit into `build/`, builds it and the
+driver, and prepares the files to install in `build/stage/`. Nothing is
 installed yet.
 
 ### 3. Install (as root)
@@ -125,6 +127,8 @@ The script:
 - backs up any libfprint already present in `/usr/local/lib64` that was not
   installed by this project, and verifies the backup before overwriting
   anything;
+- removes ELAN's proprietary driver if an earlier version of this project
+  installed it;
 - copies the files to `/usr/local/lib64`;
 - adds `/usr/local/lib64` to the dynamic linker path if it is missing
   (`/etc/ld.so.conf.d/elan-0c57-fingerprint-linux.conf`);
@@ -134,9 +138,12 @@ The script:
 ### 4. Enroll and test
 
 ```sh
-fprintd-enroll -f right-index-finger   # 18 touches, move the finger a bit each time
+fprintd-enroll -f right-index-finger   # 12 touches, move the finger a bit each time
 fprintd-verify
 ```
+
+Prints enrolled with ELAN's proprietary driver can't be used by this one:
+enroll them again.
 
 To use the fingerprint for login and `sudo` on Fedora:
 
@@ -157,7 +164,7 @@ works exactly like the password.
 
 ```sh
 sudo ./uninstall.sh
-fprintd-delete $USER        # prints made with the ELAN driver can't be reused
+fprintd-delete $USER        # prints made with this driver can't be reused by others
 ```
 
 This removes the installed files and restores the backup made by
@@ -168,17 +175,25 @@ libfprint.
 
 ## Results
 
-Measured on the tested laptop (right index finger enrolled, 18 touches):
+Offline, on a dataset of 75 touches (right index, left index, right thumb;
+12 touches enrolled per finger, the others verified, 20 random splits, partial
+touches left out), with the fixed threshold 0.86:
 
-| Test | Right index accepted | Wrong finger (thumb) accepted |
-|---|---|---|
-| libfprint example `verify` | 5 / 7 | 0 / 2 |
-| `fprintd-verify` | 5 / 5 | – |
-| `fprintd-verify` with LED handling | 7 / 9 | – |
+| | |
+|---|---|
+| Right finger accepted at the first touch | 79% |
+| Wrong finger accepted | 0 of 1360 attempts (highest score 0.825) |
 
-The sensor only sees about 4x4 mm of the finger, so a touch is sometimes
-rejected and has to be repeated. No wrong finger was accepted in the tests,
-but the number of impostor attempts is small: keep a password as fallback.
+Live, through `fprintd` and libfprint's example programs:
+
+| Test | Result |
+|---|---|
+| Right index, enrolled | 9 accepted out of 9 |
+| Other fingers | 3 rejected out of 3 (1 partial touch, asked to repeat) |
+
+For comparison, ELAN's proprietary driver accepted the right index about 17
+times out of 21. The dataset was collected in one session: keep a password
+as fallback, as for any fingerprint reader.
 
 ---
 
@@ -187,21 +202,19 @@ but the number of impostor attempts is small: keep a password as fallback.
 - **Updates:** distribution updates don't touch `/usr/local`. If a future
   `fprintd` stops working with this libfprint-TOD version, run `./build.sh`
   and `sudo ./install.sh` again (possibly with a newer `TOD_COMMIT`).
-- **Debugging:** `ELAN_LED_TRACE=1` makes `libelancrypto.so` print every USB
-  transfer of the driver; `G_MESSAGES_DEBUG=all` enables libfprint debug logs.
-- **Open source driver:** [`docs/TECHNICAL.md`](docs/TECHNICAL.md) describes
-  the protocol findings and the experiments with the open source `elan` driver
-  (it talks to the sensor fine, but its matchers are not reliable on such a
-  small sensor). The experimental patch is in [`patches/`](patches).
+- **Debugging:** `G_MESSAGES_DEBUG=libfprint-elan0c57rs` prints the score of
+  every verification; `G_MESSAGES_DEBUG=all` enables all libfprint logs.
+- **Developing:** see [`driver/README.md`](driver/README.md) to capture
+  datasets, evaluate the matcher and test the driver without installing it.
 
 ---
 
 ## License
 
-The code in this repository (scripts, `src/`, `patches/`, `extras/`) is licensed under the
+The code in this repository is licensed under the
 **GNU Lesser General Public License v2.1 or later** (LGPL), like libfprint.
 
-<img src="images/LGPLv3_Logo.svg.png" alt="LGPL License" width="200"/>
+[![license: LGPL v2.1 or later](images/license-lgpl.svg)](LICENSE)
 
 This program is free software: you can redistribute it and/or modify it under the terms of the
 GNU Lesser General Public License as published by the Free Software Foundation, either version 2.1
@@ -211,9 +224,6 @@ This program is distributed in the hope that it will be useful, but WITHOUT ANY 
 even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 GNU Lesser General Public License for more details.
 
-The ELAN driver is proprietary software owned by its authors and is subject to their own
-license; it is not distributed here.
-
 ---
 
 ## Authors & Credits
@@ -222,11 +232,13 @@ license; it is not distributed here.
 
 Third-party work this project builds on:
 
-- ELAN Microelectronics / Lenovo: the proprietary TOD driver.
-- [TonyHoyle/libfprint-2-tod1-elan](https://github.com/TonyHoyle/libfprint-2-tod1-elan):
-  the extracted driver.
 - [Marco Trevisan (3v1n0) – libfprint-TOD](https://gitlab.freedesktop.org/3v1n0/libfprint/-/tree/tod).
-- [libfprint](https://fprint.freedesktop.org/) and the `elan` driver authors.
+- [libfprint](https://fprint.freedesktop.org/) and the authors of its `elan` driver, whose protocol
+  the Rust driver follows.
+- Padfield, *Masked object registration in the Fourier domain* (2012), for the masked NCC.
+- The Rust crates in [`driver/Cargo.toml`](driver/Cargo.toml) (`rusb`, `rustfft`, `png`, `clap`,
+  `anyhow` and their dependencies), all under permissive licenses (MIT, Apache-2.0, Zlib).
+  They are downloaded by `cargo` at build time and are not part of this repository.
 
 ---
 
