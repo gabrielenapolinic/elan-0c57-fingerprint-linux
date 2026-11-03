@@ -22,6 +22,12 @@ plugged into `fprintd` through libfprint-TOD.
 > 4x4 mm of the finger, so now and then a touch has to be repeated (see
 > [Results](#results)). This is an unofficial project, not affiliated with ELAN or Lenovo.
 
+> **New in 0.2.0 – Fedora 45:** GNOME Shell 51 no longer offers the fingerprint
+> on the GDM login screen (only `sudo` and the lock screen). Install
+> [`extras/gdm-fingerprint-login`](extras/gdm-fingerprint-login) to get it back,
+> see [step 5](#5-fedora-45-fingerprint-on-the-login-screen). Full list of
+> changes in [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## Key Features
@@ -34,7 +40,8 @@ plugged into `fprintd` through libfprint-TOD.
 * **Working LED** while the reader waits for a finger.
 * **Automatic language:** the scripts and the `elan-capture` / `elan-match` tools speak English, Italian, French, German, Spanish or Portuguese, following the system.
 * **Clean install and uninstall:** everything goes to `/usr/local`, distribution packages are not touched, previous files are backed up.
-* **Optional GNOME keyring unlock** via the TPM, so the fingerprint works exactly like the password.
+* **Fingerprint on the Fedora 45 login screen** with `extras/gdm-fingerprint-login`, regenerated automatically after GNOME Shell updates.
+* **Optional GNOME keyring unlock** via the TPM, so the fingerprint works exactly like the password (gnome-keyring only, Fedora 44 and earlier).
 
 ---
 
@@ -52,7 +59,9 @@ plugged into `fprintd` through libfprint-TOD.
 * `docs/TECHNICAL.md`: protocol findings and experiments.
 * `images/`: README badges.
 * `patches/`: earlier experiment with libfprint's own `elan` driver.
+* `extras/gdm-fingerprint-login/`: optional tool that brings the fingerprint back to the GDM login screen on Fedora 45 (GNOME Shell 51).
 * `extras/keyring-tpm/`: optional tool to unlock the GNOME keyring after a fingerprint login.
+* `CHANGELOG.md`: changes between versions.
 
 ---
 
@@ -62,7 +71,7 @@ plugged into `fprintd` through libfprint-TOD.
 |---|---|
 | Laptop | Lenovo IdeaPad 3 15IML05 (machine type 81WB) |
 | Reader | `04f3:0c57` ELAN:Fingerprint, firmware 0x0216, 80x80 press sensor |
-| OS | Fedora 44, kernel 7.2, fprintd 1.94.5 |
+| OS | Fedora 45, kernel 7.2, fprintd 1.94.5, GNOME Shell 51.1, GDM 51.0 (also Fedora 44 up to 0.1.0) |
 
 Check your reader with `lsusb | grep 04f3:0c57`.
 
@@ -151,12 +160,30 @@ To use the fingerprint for login and `sudo` on Fedora:
 sudo authselect enable-feature with-fingerprint
 ```
 
-### 5. Optional: unlock the GNOME keyring
+### 5. Fedora 45: fingerprint on the login screen
+
+GNOME Shell 51 (Fedora 45) uses the fingerprint only to unlock the screen and
+for `sudo`, not on the GDM login screen. To get it back:
+
+```sh
+sudo extras/gdm-fingerprint-login/gdm-fingerprint-login install
+```
+
+It replaces a single file of the login screen, generated from the installed
+gnome-shell, through `G_RESOURCE_OVERLAYS`; no package is modified and it is
+regenerated automatically after GNOME Shell updates. Details and uninstall in
+[`extras/gdm-fingerprint-login`](extras/gdm-fingerprint-login). Not needed on
+Fedora 44.
+
+### 6. Optional: unlock the GNOME keyring
 
 A fingerprint login provides no password, so the GNOME keyring stays locked.
 [`extras/keyring-tpm`](extras/keyring-tpm) seals the login password in the
 TPM and unlocks the keyring at the start of the session, so the fingerprint
 works exactly like the password.
+On Fedora 45 the secret service is **oo7**, which `keyring-tpm` does not
+support yet: after a fingerprint login the keyring stays locked until it is
+unlocked with the password.
 
 ---
 
@@ -165,6 +192,7 @@ works exactly like the password.
 ```sh
 sudo ./uninstall.sh
 fprintd-delete $USER        # prints made with this driver can't be reused by others
+sudo gdm-fingerprint-login uninstall   # only if installed (Fedora 45)
 ```
 
 This removes the installed files and restores the backup made by

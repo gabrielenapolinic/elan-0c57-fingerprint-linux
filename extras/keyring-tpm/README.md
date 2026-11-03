@@ -11,6 +11,10 @@ graphical session, gets the password back from the TPM and unlocks the
 keyring over D-Bus. The fingerprint therefore works exactly like the login
 password. PAM is not modified.
 
+> **Fedora 45:** gnome-keyring has been replaced by **oo7**, and this tool
+> does not support it yet (it uses a gnome-keyring D-Bus interface). It works
+> on Fedora 44 and earlier, or wherever gnome-keyring is the secret service.
+
 ## Requirements
 
 - GNOME with gnome-keyring, systemd ≥ 256 (`systemd-creds --user`), a TPM2 chip

@@ -1,0 +1,222 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# gdm-fingerprint-login: offer the fingerprint on the GDM login screen again.
+#
+# Since GNOME Shell 51 (Fedora 45) the login screen connects to fprintd only
+# to unlock an existing session (reauthentication), never for the first
+# login: gdm/authServicesLegacy.js starts with
+#
+#     _connectFingerprintManager() {
+#         if (!this._reauthOnly)
+#             return;
+#
+# This tool extracts that file from the installed gnome-shell, removes the two
+# lines and makes the login screen load the copy through G_RESOURCE_OVERLAYS
+# (a drop-in for org.gnome.Shell@gdm.service). No package is modified, and the
+# file is never shipped: it is always generated from the installed gnome-shell.
+#
+# A boot service (gdm-fingerprint-login.service) runs "refresh" before GDM
+# starts: after a gnome-shell update the copy is generated again, and if the
+# patch no longer applies the overlay is removed, so the login screen always
+# falls back to the stock behaviour instead of breaking.
+#
+# Commands (as root):
+#   install     generate the patched file, enable the overlay and the service
+#   refresh     regenerate the file if gnome-shell changed (used at boot)
+#   uninstall   remove everything
+#   status      show the current state
+
+set -euo pipefail
+
+NAME="gdm-fingerprint-login"
+RESOURCE="/org/gnome/shell/gdm/authServicesLegacy.js"
+DATA_DIR="/usr/local/share/elan-0c57-fingerprint-linux/$NAME"
+PATCHED="$DATA_DIR/authServicesLegacy.js"
+STAMP="$DATA_DIR/source.sha256"
+BIN="/usr/local/sbin/$NAME"
+UNIT="/etc/systemd/system/$NAME.service"
+DROPIN_DIR="/etc/systemd/user/org.gnome.Shell@gdm.service.d"
+DROPIN="$DROPIN_DIR/elan-0c57-fingerprint-login.conf"
+# left by the first, manual version of this fix
+OLD_DROPIN="$DROPIN_DIR/fingerprint-login.conf"
+OLD_DATA_DIR="/usr/local/share/gdm-fingerprint-fix"
+
+say () { echo "$NAME: $*"; }
+die () { echo "$NAME: ERROR: $*" >&2; exit 1; }
+need_root () { [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 $1"; }
+
+# The gnome-shell library that contains the login screen code.
+find_library () {
+  local lib
+  for lib in /usr/lib64/gnome-shell/libshell-*.so /usr/lib/gnome-shell/libshell-*.so \
+             /usr/lib/*/gnome-shell/libshell-*.so; do
+    [ -f "$lib" ] || continue
+    # no "grep -q": with pipefail, gresource killed by SIGPIPE would fail
+    if gresource list "$lib" 2>/dev/null | grep -xF "$RESOURCE" >/dev/null; then
+      echo "$lib"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Writes the patched copy of $RESOURCE from library $1 to file $2.
+# Exit status: 0 patched, 2 nothing to patch (check absent), 1 error.
+generate () {
+  local lib="$1" out="$2"
+  gresource extract "$lib" "$RESOURCE" > "$out.orig" || return 1
+  /usr/bin/python3 -I - "$out.orig" "$out" <<'PY'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding="utf-8").read()
+pattern = re.compile(
+    r"(\n[ \t]*_connectFingerprintManager\(\)\s*\{\n)"
+    r"[ \t]*if \(!this\._reauthOnly\)\n[ \t]*return;\n")
+if "_connectFingerprintManager" not in text:
+    sys.exit(1)                      # code changed: don't guess
+new, count = pattern.subn(
+    r"\1        // elan-0c57-fingerprint-linux: fingerprint on the login screen too\n",
+    text)
+if count == 0:
+    sys.exit(2 if "this._reauthOnly)\n" not in text else 1)
+if count != 1:
+    sys.exit(1)
+open(dst, "w", encoding="utf-8").write(new)
+PY
+  local rc=$?
+  rm -f "$out.orig"
+  return $rc
+}
+
+remove_overlay () {
+  rm -f "$DROPIN" "$OLD_DROPIN"
+  rmdir "$DROPIN_DIR" 2>/dev/null || true
+  rm -f "$PATCHED" "$STAMP"
+}
+
+# Generates the file and enables the overlay; $1 = "quiet" at boot.
+apply () {
+  local lib sum tmp rc=0
+  if ! lib="$(find_library)"; then
+    remove_overlay
+    say "gnome-shell's $RESOURCE not found: overlay disabled"
+    return 0
+  fi
+  sum="$(sha256sum "$lib" | cut -d' ' -f1)"
+  if [ "${1:-}" = quiet ] && [ -f "$PATCHED" ] && [ -f "$DROPIN" ] \
+     && [ "$(cat "$STAMP" 2>/dev/null)" = "$sum" ]; then
+    return 0                         # gnome-shell unchanged
+  fi
+  mkdir -p "$DATA_DIR"
+  tmp="$(mktemp "$DATA_DIR/.new.XXXXXX")"
+  generate "$lib" "$tmp" || rc=$?
+  case $rc in
+    0)
+      chmod 644 "$tmp"
+      mv -f "$tmp" "$PATCHED"
+      echo "$sum" > "$STAMP"
+      mkdir -p "$DROPIN_DIR"
+      rm -f "$OLD_DROPIN"
+      cat > "$DROPIN" <<CONF
+# Installed by elan-0c57-fingerprint-linux (extras/$NAME)
+[Service]
+Environment=G_RESOURCE_OVERLAYS=$RESOURCE=$PATCHED
+CONF
+      command -v restorecon >/dev/null && restorecon -R "$DATA_DIR" "$DROPIN_DIR" 2>/dev/null || true
+      say "fingerprint enabled on the login screen ($(basename "$lib"))"
+      ;;
+    2)
+      rm -f "$tmp"
+      remove_overlay
+      say "this gnome-shell already offers the fingerprint at login: overlay not needed"
+      ;;
+    *)
+      rm -f "$tmp"
+      remove_overlay
+      say "WARNING: the code of this gnome-shell changed, the patch no longer applies;"
+      say "overlay removed, the login screen uses the stock behaviour"
+      return 1
+      ;;
+  esac
+}
+
+cmd_install () {
+  need_root install
+  command -v gresource >/dev/null || die "gresource not found (package glib2-devel on Fedora)"
+  [ -x /usr/bin/python3 ] || die "/usr/bin/python3 not found"
+  rm -f "$OLD_DROPIN"; rm -rf "$OLD_DATA_DIR"
+  install -Dm755 "$(readlink -f "$0")" "$BIN"
+  cat > "$UNIT" <<UNIT
+# Installed by elan-0c57-fingerprint-linux (extras/$NAME)
+[Unit]
+Description=Fingerprint on the GDM login screen (regenerate after gnome-shell updates)
+Before=display-manager.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=$BIN refresh
+
+[Install]
+WantedBy=graphical.target
+UNIT
+  command -v restorecon >/dev/null && restorecon "$BIN" "$UNIT" 2>/dev/null || true
+  systemctl daemon-reload
+  systemctl enable "$NAME.service" >/dev/null
+  apply
+  echo
+  say "done. Log out (or reboot) and touch the reader on the login screen."
+  say "if the login screen ever fails to start: Ctrl+Alt+F3, log in, run"
+  say "  sudo $BIN uninstall"
+}
+
+cmd_refresh () {
+  need_root refresh
+  apply quiet
+}
+
+cmd_uninstall () {
+  need_root uninstall
+  if [ -f "$UNIT" ]; then
+    systemctl disable "$NAME.service" >/dev/null 2>&1 || true
+    rm -f "$UNIT"
+    systemctl daemon-reload
+  fi
+  remove_overlay
+  rm -rf "$OLD_DATA_DIR" "$DATA_DIR"
+  rmdir /usr/local/share/elan-0c57-fingerprint-linux 2>/dev/null || true
+  rm -f "$BIN"
+  say "removed. From the next login GDM uses the stock behaviour."
+}
+
+cmd_status () {
+  local lib=""
+  if lib="$(find_library)"; then
+    echo "gnome-shell library: $lib"
+  else
+    echo "gnome-shell library: not found"
+  fi
+  if [ -f "$DROPIN" ] && [ -f "$PATCHED" ]; then
+    echo "overlay:             enabled ($PATCHED)"
+    if [ -n "$lib" ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$(sha256sum "$lib" | cut -d' ' -f1)" ]; then
+      echo "                     gnome-shell changed: regenerated at the next boot"
+    fi
+  else
+    echo "overlay:             disabled"
+  fi
+  [ -f "$OLD_DROPIN" ] && echo "old manual fix:      present ($OLD_DROPIN), removed by install"
+  if [ -f "$UNIT" ]; then
+    echo "boot service:        $(systemctl is-enabled "$NAME.service" 2>/dev/null || true)"
+  else
+    echo "boot service:        not installed"
+  fi
+}
+
+case "${1:-}" in
+  install)   cmd_install ;;
+  refresh)   cmd_refresh ;;
+  uninstall) cmd_uninstall ;;
+  status)    cmd_status ;;
+  *) sed -n '3,28s/^# \{0,1\}//p' "$0"; exit 2 ;;
+esac
